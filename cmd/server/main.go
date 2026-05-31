@@ -37,6 +37,7 @@ func main() {
 		ProtocolVersion:  config.ProtocolVersion,
 		MinClientVersion: config.MinClientVersion,
 		Auth:             auth.Dev{User: cfg.DevUser, Secret: cfg.DevSecret},
+		World:            world,
 		HandshakeTimeout: cfg.HandshakeTimeout,
 		Logger:           slog.Default(),
 	}

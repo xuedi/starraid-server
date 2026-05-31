@@ -1,7 +1,8 @@
-// Package session drives a single connection through the StarRaid handshake:
-// version negotiation then authentication, reaching an authenticated session
-// (see docs/protocol.md "Session lifecycle"). The path is identical for humans
-// and bots. Spawn/SelfAssign and the live command/event loop are later slices.
+// Package session drives a single connection through the StarRaid session
+// lifecycle: version negotiation, authentication, then spawn/SelfAssign into a
+// live session (see docs/protocol.md "Session lifecycle"). The path is identical
+// for humans and bots. The live command/event loop (movement, neighbour beacons)
+// is a later slice.
 package session
 
 import (
@@ -15,16 +16,25 @@ import (
 	"time"
 
 	"github.com/xuedi/starraid-server/internal/auth"
+	"github.com/xuedi/starraid-server/internal/game"
 	"github.com/xuedi/starraid-server/internal/wire"
 
 	pb "github.com/xuedi/starraid-protocol/gen/go/starraid/v1"
 )
+
+// Spawner assigns a connecting client its controlled object and releases it when
+// the connection drops. *game.World satisfies it; a fake is used in tests.
+type Spawner interface {
+	SpawnFor() game.Object
+	Despawn(id uint64)
+}
 
 // Deps is the per-connection dependency set Handle needs.
 type Deps struct {
 	ProtocolVersion  uint32             // version this server speaks
 	MinClientVersion uint32             // oldest client version still accepted
 	Auth             auth.Authenticator // credential check (dev stub or DB-backed)
+	World            Spawner            // assigns the controlled object after auth
 	HandshakeTimeout time.Duration      // read deadline covering hello+login
 	Logger           *slog.Logger       // per-connection structured logging
 }
@@ -34,6 +44,7 @@ const (
 	phaseHello  = "await_hello"
 	phaseLogin  = "await_login"
 	phaseAuthed = "authenticated"
+	phaseLive   = "live"
 )
 
 // Handle runs the handshake state machine on conn. It returns when the
@@ -63,11 +74,31 @@ func Handle(ctx context.Context, conn net.Conn, deps Deps) {
 		return
 	}
 
-	// Authenticated. Clear the handshake deadline; the live session (commands,
-	// beacons, events) is a later slice, so for now we hold the connection open
-	// until the peer disconnects or the server shuts down.
+	// Authenticated. Clear the handshake deadline and move into the live session.
 	_ = conn.SetReadDeadline(time.Time{})
 	log.Info("authenticated session", "phase", phaseAuthed, "account", id.AccountID)
+	liveSession(conn, deps, id, log)
+}
+
+// liveSession spawns the client's controlled object, tells it what it controls
+// (SelfAssign) and its initial state (SelfUpdate), then holds the connection
+// open. The controlled object is despawned when the connection drops (no
+// persistence yet). The command/event loop replaces park here in a later slice.
+func liveSession(conn net.Conn, deps Deps, id auth.Identity, log *slog.Logger) {
+	obj := deps.World.SpawnFor()
+	defer deps.World.Despawn(obj.ID)
+	log = log.With("phase", phaseLive, "account", id.AccountID, "object_id", obj.ID)
+	log.Info("self assigned", "x", obj.X, "y", obj.Y)
+
+	pos := &pb.Vec2{X: obj.X, Y: obj.Y}
+	if err := sendServer(conn, &pb.SelfAssign{ObjectId: obj.ID, Position: pos}); err != nil {
+		log.Warn("write SelfAssign failed", "err", err)
+		return
+	}
+	if err := sendServer(conn, &pb.SelfUpdate{ObjectId: obj.ID, Position: pos}); err != nil {
+		log.Warn("write SelfUpdate failed", "err", err)
+		return
+	}
 	park(conn)
 }
 
@@ -150,6 +181,10 @@ func sendServer(conn net.Conn, payload any) error {
 		msg.Msg = &pb.ServerMessage_VersionResult{VersionResult: p}
 	case *pb.LoginResult:
 		msg.Msg = &pb.ServerMessage_LoginResult{LoginResult: p}
+	case *pb.SelfAssign:
+		msg.Msg = &pb.ServerMessage_SelfAssign{SelfAssign: p}
+	case *pb.SelfUpdate:
+		msg.Msg = &pb.ServerMessage_SelfUpdate{SelfUpdate: p}
 	default:
 		return fmt.Errorf("session: unknown server payload %T", payload)
 	}

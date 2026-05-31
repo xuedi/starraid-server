@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/xuedi/starraid-server/internal/auth"
+	"github.com/xuedi/starraid-server/internal/game"
 	"github.com/xuedi/starraid-server/internal/session"
 	"github.com/xuedi/starraid-server/internal/wire"
 
@@ -27,8 +28,22 @@ func defaultDeps() session.Deps {
 		ProtocolVersion:  1,
 		MinClientVersion: 1,
 		Auth:             auth.Dev{User: "dev", Secret: "s3cr3t"},
+		World:            game.New(),
 		HandshakeTimeout: 2 * time.Second,
 		Logger:           quietLogger(),
+	}
+}
+
+// authenticate runs the full handshake+login over conn, asserting success.
+func authenticate(t *testing.T, conn net.Conn) {
+	t.Helper()
+	sendHello(t, conn, 1)
+	if vr := readServer(t, conn).GetVersionResult(); vr == nil || !vr.Accepted {
+		t.Fatalf("want VersionResult{accepted}, got %+v", vr)
+	}
+	sendLogin(t, conn, "dev", "s3cr3t")
+	if lr := readServer(t, conn).GetLoginResult(); lr == nil || !lr.Ok {
+		t.Fatalf("want LoginResult{ok}, got %+v", lr)
 	}
 }
 
@@ -92,15 +107,54 @@ func TestHappyPath(t *testing.T) {
 	}
 	defer conn.Close()
 
-	sendHello(t, conn, 1)
-	if vr := readServer(t, conn).GetVersionResult(); vr == nil || !vr.Accepted {
-		t.Fatalf("want VersionResult{accepted}, got %+v", vr)
+	authenticate(t, conn)
+
+	// After auth the server assigns the controlled object and pushes its
+	// initial state.
+	sa := readServer(t, conn).GetSelfAssign()
+	if sa == nil || sa.ObjectId == 0 || sa.Position == nil {
+		t.Fatalf("want SelfAssign{object_id>0, position}, got %+v", sa)
+	}
+	su := readServer(t, conn).GetSelfUpdate()
+	if su == nil || su.ObjectId != sa.ObjectId {
+		t.Fatalf("want SelfUpdate for object %d, got %+v", sa.ObjectId, su)
+	}
+}
+
+// TestControlledObjectDespawnsOnDisconnect verifies the assigned object exists
+// while the connection is live and is removed once it drops.
+func TestControlledObjectDespawnsOnDisconnect(t *testing.T) {
+	w := game.New()
+	deps := defaultDeps()
+	deps.World = w
+	addr, stop := serve(t, deps)
+	defer stop()
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	authenticate(t, conn)
+	if readServer(t, conn).GetSelfAssign() == nil {
+		t.Fatalf("want SelfAssign")
 	}
 
-	sendLogin(t, conn, "dev", "s3cr3t")
-	if lr := readServer(t, conn).GetLoginResult(); lr == nil || !lr.Ok {
-		t.Fatalf("want LoginResult{ok}, got %+v", lr)
+	waitForCount(t, w, 1) // object present while connected
+	_ = conn.Close()
+	waitForCount(t, w, 0) // despawned after disconnect
+}
+
+// waitForCount polls w.Count() until it equals want or a deadline passes.
+func waitForCount(t *testing.T, w *game.World, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if w.Count() == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
+	t.Fatalf("world object count = %d, want %d", w.Count(), want)
 }
 
 func TestVersionTooOld(t *testing.T) {
