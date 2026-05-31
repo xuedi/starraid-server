@@ -1,0 +1,17 @@
+# Dev infrastructure for the StarRaid server. PostgreSQL is the single source of
+# truth (see ../docs/database.md). The server owns the schema + migrations, so the
+# DB compose lives here; the admin tool writes to the same database.
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: starraid
+      POSTGRES_PASSWORD: starraid
+      POSTGRES_DB: starraid
+    ports:
+      - "5432:5432"
+    volumes:
+      - starraid-db:/var/lib/postgresql/data
+
+volumes:
+  starraid-db:
