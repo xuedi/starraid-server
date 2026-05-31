@@ -11,6 +11,7 @@ import (
 
 	"github.com/xuedi/starraid-server/internal/auth"
 	"github.com/xuedi/starraid-server/internal/config"
+	"github.com/xuedi/starraid-server/internal/db"
 	"github.com/xuedi/starraid-server/internal/game"
 	"github.com/xuedi/starraid-server/internal/session"
 )
@@ -21,6 +22,13 @@ func main() {
 		"protocol_version", config.ProtocolVersion, "min_client_version", config.MinClientVersion)
 	if cfg.DevSecret == "" {
 		slog.Warn("dev auth disabled: STARRAID_DEV_SECRET is empty, all logins will be rejected")
+	}
+
+	// The server owns the schema and applies migrations on startup (idempotent;
+	// see docs/database.md). Standalone runs use cmd/migrate (`just migrate`).
+	if err := db.Migrate(cfg.DatabaseURL); err != nil {
+		slog.Error("database migration failed", "err", err)
+		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
