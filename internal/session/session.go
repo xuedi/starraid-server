@@ -113,7 +113,7 @@ func liveSession(ctx context.Context, conn net.Conn, deps Deps, id auth.Identity
 	log.Info("self assigned", "x", st.X, "y", st.Y, "spawned", spawned)
 
 	pos := &pb.Vec2{X: st.X, Y: st.Y}
-	if err := sendServer(conn, &pb.SelfAssign{ObjectId: objID, Position: pos}); err != nil {
+	if err := sendServer(conn, &pb.SelfAssign{ObjectId: objID, Position: pos, TypeKey: st.TypeKey}); err != nil {
 		log.Warn("write SelfAssign failed", "err", err)
 		return
 	}
@@ -125,7 +125,7 @@ func liveSession(ctx context.Context, conn net.Conn, deps Deps, id auth.Identity
 	// Neighbour beacons: announce every other object the client can perceive
 	// (naive whole-sector set for now; distance/sensor gating is a later slice).
 	for _, n := range deps.World.Neighbours(objID) {
-		if err := sendServer(conn, &pb.ObjectEnter{ObjectId: n.ID, Position: &pb.Vec2{X: n.X, Y: n.Y}}); err != nil {
+		if err := sendServer(conn, &pb.ObjectEnter{ObjectId: n.ID, Position: &pb.Vec2{X: n.X, Y: n.Y}, TypeKey: n.TypeKey}); err != nil {
 			log.Warn("write ObjectEnter failed", "err", err)
 			return
 		}

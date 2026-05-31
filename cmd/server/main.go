@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/xuedi/starraid-server/internal/auth"
+	"github.com/xuedi/starraid-server/internal/catalog"
 	"github.com/xuedi/starraid-server/internal/config"
 	"github.com/xuedi/starraid-server/internal/db"
 	"github.com/xuedi/starraid-server/internal/game"
@@ -39,6 +40,14 @@ func main() {
 	}
 	defer pool.Close()
 
+	// Code is the source of truth for the catalog's STRUCTURE: sync the
+	// code-defined classes/modules/items into the catalog tables so the admin
+	// (and the world-load join below) can resolve them (see docs/database.md).
+	if err := catalog.Sync(ctx, pool.Pool); err != nil {
+		slog.Error("catalog sync failed", "err", err)
+		os.Exit(1)
+	}
+
 	world := game.New()
 	if sectorID, ok, err := pool.FirstSectorID(ctx); err != nil {
 		slog.Error("load starting sector failed", "err", err)
@@ -49,12 +58,19 @@ func main() {
 			slog.Error("load sector objects failed", "err", err)
 			os.Exit(1)
 		}
-		states := make([]game.ObjectState, len(objs))
+		seeds := make([]game.Seed, len(objs))
 		for i, o := range objs {
-			states[i] = game.ObjectState{ID: o.ID, X: o.X, Y: o.Y}
+			s := game.Seed{ID: o.ID, X: o.X, Y: o.Y, TypeKey: o.TypeKey, BaseMass: o.BaseMass}
+			for _, m := range o.Modules {
+				s.Modules = append(s.Modules, game.Module{Mass: m.Mass, Params: m.Params})
+			}
+			for _, c := range o.Cargo {
+				s.Cargo = append(s.Cargo, game.Cargo{UnitMass: c.UnitMass, Quantity: c.Quantity})
+			}
+			seeds[i] = s
 		}
-		world.Load(states)
-		slog.Info("loaded starting sector", "sector_id", sectorID, "objects", len(states))
+		world.Load(seeds)
+		slog.Info("loaded starting sector", "sector_id", sectorID, "objects", len(seeds))
 	} else {
 		slog.Warn("no sector found; world starts empty (run the admin seed)")
 	}

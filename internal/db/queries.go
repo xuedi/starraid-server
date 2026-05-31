@@ -2,11 +2,14 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/xuedi/starraid-server/internal/catalog"
 )
 
 // ErrNotFound is returned by the lookups below when no row matches. Callers
@@ -83,10 +86,30 @@ func (p *Pool) UpdateAccountLastLogin(ctx context.Context, accountID int64) erro
 	return err
 }
 
-// SectorObject is a wire-relevant object row loaded for an active sector.
+// SectorObject is an object loaded for an active sector, fat: its class base
+// attributes plus its per-instance fitting (modules + cargo). The server derives
+// the object's live attributes (mass/power/speed/shield) from this (see
+// docs/objects.md); the catalog gives structure, the fitting gives configuration.
 type SectorObject struct {
-	ID   uint64
-	X, Y int64
+	ID       uint64
+	X, Y     int64
+	TypeKey  string // object_class.key — carried on the beacon for client sprites
+	BaseMass int64  // object_class.base_mass
+	Modules  []SectorModule
+	Cargo    []SectorCargo
+}
+
+// SectorModule is one installed module on a loaded object: its mass plus the
+// behaviour parameters the server's derivation reads.
+type SectorModule struct {
+	Mass   int64
+	Params catalog.ModuleParams
+}
+
+// SectorCargo is one cargo stack on a loaded object: per-unit mass × quantity.
+type SectorCargo struct {
+	UnitMass int64
+	Quantity int64
 }
 
 // FirstSectorID returns the id of the lowest-numbered sector (the starting area
@@ -103,24 +126,99 @@ func (p *Pool) FirstSectorID(ctx context.Context) (id int64, ok bool, err error)
 }
 
 // LoadSectorObjects returns every object in the given sector (the naive active
-// set for now; sector/interest scoping is refined in later slices).
+// set for now; sector/interest scoping is refined in later slices), each loaded
+// fat: class base attributes joined from object_class, plus the per-instance
+// fitting (object_modules joined to module_types, object_items joined to
+// item_types). Three queries keyed by object_id rather than one wide join, so an
+// object's modules and cargo don't multiply each other.
 func (p *Pool) LoadSectorObjects(ctx context.Context, sectorID int64) ([]SectorObject, error) {
 	rows, err := p.Query(ctx,
-		`SELECT id, x, y FROM objects WHERE sector_id = $1 ORDER BY id`, sectorID)
+		`SELECT o.id, o.x, o.y, oc.key, oc.base_mass
+		   FROM objects o JOIN object_class oc ON o.object_class_id = oc.id
+		  WHERE o.sector_id = $1 ORDER BY o.id`, sectorID)
 	if err != nil {
 		return nil, fmt.Errorf("db: load sector objects: %w", err)
 	}
 	defer rows.Close()
 
-	var out []SectorObject
+	out := make([]SectorObject, 0)
+	byID := make(map[uint64]*SectorObject)
 	for rows.Next() {
 		var o SectorObject
 		var id int64
-		if err := rows.Scan(&id, &o.X, &o.Y); err != nil {
+		if err := rows.Scan(&id, &o.X, &o.Y, &o.TypeKey, &o.BaseMass); err != nil {
 			return nil, fmt.Errorf("db: scan object: %w", err)
 		}
 		o.ID = uint64(id)
 		out = append(out, o)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("db: load sector objects: %w", err)
+	}
+	for i := range out {
+		byID[out[i].ID] = &out[i]
+	}
+	if err := p.loadSectorModules(ctx, sectorID, byID); err != nil {
+		return nil, err
+	}
+	if err := p.loadSectorCargo(ctx, sectorID, byID); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// loadSectorModules attaches each object's installed modules (mass + behaviour
+// params) to the matching SectorObject.
+func (p *Pool) loadSectorModules(ctx context.Context, sectorID int64, byID map[uint64]*SectorObject) error {
+	rows, err := p.Query(ctx,
+		`SELECT om.object_id, mt.mass, mt.params
+		   FROM object_modules om
+		   JOIN module_types mt ON om.module_type_id = mt.id
+		   JOIN objects o ON om.object_id = o.id
+		  WHERE o.sector_id = $1`, sectorID)
+	if err != nil {
+		return fmt.Errorf("db: load sector modules: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var objID int64
+		var m SectorModule
+		var params []byte
+		if err := rows.Scan(&objID, &m.Mass, &params); err != nil {
+			return fmt.Errorf("db: scan module: %w", err)
+		}
+		if err := json.Unmarshal(params, &m.Params); err != nil {
+			return fmt.Errorf("db: module params for object %d: %w", objID, err)
+		}
+		if o := byID[uint64(objID)]; o != nil {
+			o.Modules = append(o.Modules, m)
+		}
+	}
+	return rows.Err()
+}
+
+// loadSectorCargo attaches each object's cargo stacks (per-unit mass × quantity)
+// to the matching SectorObject.
+func (p *Pool) loadSectorCargo(ctx context.Context, sectorID int64, byID map[uint64]*SectorObject) error {
+	rows, err := p.Query(ctx,
+		`SELECT oi.object_id, it.mass, oi.quantity
+		   FROM object_items oi
+		   JOIN item_types it ON oi.item_type_id = it.id
+		   JOIN objects o ON oi.object_id = o.id
+		  WHERE o.sector_id = $1`, sectorID)
+	if err != nil {
+		return fmt.Errorf("db: load sector cargo: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var objID int64
+		var c SectorCargo
+		if err := rows.Scan(&objID, &c.UnitMass, &c.Quantity); err != nil {
+			return fmt.Errorf("db: scan cargo: %w", err)
+		}
+		if o := byID[uint64(objID)]; o != nil {
+			o.Cargo = append(o.Cargo, c)
+		}
+	}
+	return rows.Err()
 }

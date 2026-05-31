@@ -141,7 +141,10 @@ func TestHappyPath(t *testing.T) {
 // pushes one ObjectEnter per other object in the world.
 func TestNeighbourBeacons(t *testing.T) {
 	w := game.New()
-	w.Load([]game.ObjectState{{ID: 1, X: 100, Y: 0}, {ID: 2, X: 0, Y: 100}})
+	w.Load([]game.Seed{
+		{ID: 1, X: 100, Y: 0, TypeKey: "hauler"},
+		{ID: 2, X: 0, Y: 100, TypeKey: "asteroid"},
+	})
 	deps := defaultDeps()
 	deps.World = w
 	addr, stop := serve(t, deps)
@@ -161,12 +164,17 @@ func TestNeighbourBeacons(t *testing.T) {
 		t.Fatalf("want SelfUpdate")
 	}
 
-	// One ObjectEnter per pre-loaded neighbour (order not guaranteed).
+	// One ObjectEnter per pre-loaded neighbour (order not guaranteed); each
+	// beacon carries the object's class key for client sprite selection.
+	wantKey := map[uint64]string{1: "hauler", 2: "asteroid"}
 	seen := map[uint64]bool{}
 	for i := 0; i < 2; i++ {
 		oe := readServer(t, conn).GetObjectEnter()
 		if oe == nil {
 			t.Fatalf("want ObjectEnter (#%d)", i+1)
+		}
+		if oe.TypeKey != wantKey[oe.ObjectId] {
+			t.Fatalf("ObjectEnter %d: want type_key %q, got %q", oe.ObjectId, wantKey[oe.ObjectId], oe.TypeKey)
 		}
 		seen[oe.ObjectId] = true
 	}

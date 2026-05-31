@@ -99,7 +99,7 @@ func TestStopHalts(t *testing.T) {
 // Neighbours excludes the named object, and nextID advances past loaded ids.
 func TestLoadAndNeighbours(t *testing.T) {
 	w := New()
-	w.Load([]ObjectState{{ID: 10, X: 100, Y: 0}, {ID: 20, X: 0, Y: 200}, {ID: 30, X: -50, Y: -50}})
+	w.Load([]Seed{{ID: 10, X: 100, Y: 0}, {ID: 20, X: 0, Y: 200}, {ID: 30, X: -50, Y: -50}})
 	if w.Count() != 3 {
 		t.Fatalf("after load: want 3 objects, got %d", w.Count())
 	}
