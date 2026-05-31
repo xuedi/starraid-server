@@ -87,6 +87,22 @@ func sendLogin(t *testing.T, conn net.Conn, user, secret string) {
 	}
 }
 
+func sendMove(t *testing.T, conn net.Conn, x, y int64) {
+	t.Helper()
+	msg := &pb.ClientMessage{Msg: &pb.ClientMessage_Move{Move: &pb.Move{Target: &pb.Vec2{X: x, Y: y}}}}
+	if err := wire.WriteClientMessage(conn, msg); err != nil {
+		t.Fatalf("send Move: %v", err)
+	}
+}
+
+func sendStop(t *testing.T, conn net.Conn) {
+	t.Helper()
+	msg := &pb.ClientMessage{Msg: &pb.ClientMessage_Stop{Stop: &pb.Stop{}}}
+	if err := wire.WriteClientMessage(conn, msg); err != nil {
+		t.Fatalf("send Stop: %v", err)
+	}
+}
+
 func readServer(t *testing.T, conn net.Conn) *pb.ServerMessage {
 	t.Helper()
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -142,6 +158,76 @@ func TestControlledObjectDespawnsOnDisconnect(t *testing.T) {
 	waitForCount(t, w, 1) // object present while connected
 	_ = conn.Close()
 	waitForCount(t, w, 0) // despawned after disconnect
+}
+
+// TestMovement drives the controlled object with Move/Stop and verifies the
+// SelfUpdate stream advances toward the target then halts after Stop. The world
+// tick loop must run for motion to happen.
+func TestMovement(t *testing.T) {
+	w := game.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+
+	deps := defaultDeps()
+	deps.World = w
+	addr, stop := serve(t, deps)
+	defer stop()
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	authenticate(t, conn)
+	if readServer(t, conn).GetSelfAssign() == nil {
+		t.Fatalf("want SelfAssign")
+	}
+	if su := readServer(t, conn).GetSelfUpdate(); su == nil || su.Position.GetX() != 0 {
+		t.Fatalf("want initial SelfUpdate at origin, got %+v", su)
+	}
+
+	// Move far along +x so it keeps moving; updates should advance X, hold Y=0.
+	sendMove(t, conn, 1_000_000, 0)
+	var prevX int64 = -1
+	for i := 0; i < 3; i++ {
+		su := readServer(t, conn).GetSelfUpdate()
+		if su == nil {
+			t.Fatalf("want SelfUpdate while moving, got non-self message")
+		}
+		if su.Position.GetX() <= prevX {
+			t.Fatalf("position not advancing: prevX=%d, got X=%d", prevX, su.Position.GetX())
+		}
+		if su.Position.GetY() != 0 {
+			t.Fatalf("want Y=0 moving along +x, got %d", su.Position.GetY())
+		}
+		prevX = su.Position.GetX()
+	}
+
+	// Stop, then drain any in-flight update; updates must then cease entirely.
+	sendStop(t, conn)
+	drainUntilQuiet(t, conn)
+	_ = conn.SetReadDeadline(time.Now().Add(400 * time.Millisecond))
+	if _, err := wire.ReadServerMessage(conn); err == nil {
+		t.Fatalf("received a SelfUpdate after Stop — object still moving")
+	} else if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("want read deadline after Stop, got %v", err)
+	}
+}
+
+// drainUntilQuiet reads SelfUpdates until a read times out (no more arrive),
+// absorbing any updates already in flight when Stop was sent.
+func drainUntilQuiet(t *testing.T, conn net.Conn) {
+	t.Helper()
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(400 * time.Millisecond))
+		if _, err := wire.ReadServerMessage(conn); err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				return
+			}
+			t.Fatalf("drain read: %v", err)
+		}
+	}
 }
 
 // waitForCount polls w.Count() until it equals want or a deadline passes.

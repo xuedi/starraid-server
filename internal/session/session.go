@@ -22,11 +22,16 @@ import (
 	pb "github.com/xuedi/starraid-protocol/gen/go/starraid/v1"
 )
 
-// Spawner assigns a connecting client its controlled object and releases it when
-// the connection drops. *game.World satisfies it; a fake is used in tests.
-type Spawner interface {
-	SpawnFor() game.Object
+// World is the session's view of the authoritative world: it assigns a
+// connecting client its controlled object, applies that client's navigation
+// intent, exposes the object's current state, and releases it on disconnect.
+// *game.World satisfies it; a fake is used in tests.
+type World interface {
+	SpawnFor() game.ObjectState
 	Despawn(id uint64)
+	SetTarget(id uint64, tx, ty int64)
+	Stop(id uint64)
+	Get(id uint64) (game.ObjectState, bool)
 }
 
 // Deps is the per-connection dependency set Handle needs.
@@ -34,7 +39,7 @@ type Deps struct {
 	ProtocolVersion  uint32             // version this server speaks
 	MinClientVersion uint32             // oldest client version still accepted
 	Auth             auth.Authenticator // credential check (dev stub or DB-backed)
-	World            Spawner            // assigns the controlled object after auth
+	World            World              // controlled-object spawn + navigation
 	HandshakeTimeout time.Duration      // read deadline covering hello+login
 	Logger           *slog.Logger       // per-connection structured logging
 }
@@ -46,6 +51,11 @@ const (
 	phaseAuthed = "authenticated"
 	phaseLive   = "live"
 )
+
+// selfUpdateInterval is how often the live session samples the controlled
+// object's position and pushes a SelfUpdate when it has changed. Matches the
+// world tick rate (see game.World.Run).
+const selfUpdateInterval = 100 * time.Millisecond
 
 // Handle runs the handshake state machine on conn. It returns when the
 // handshake fails, the peer disconnects, or ctx is cancelled. It does not close
@@ -77,29 +87,87 @@ func Handle(ctx context.Context, conn net.Conn, deps Deps) {
 	// Authenticated. Clear the handshake deadline and move into the live session.
 	_ = conn.SetReadDeadline(time.Time{})
 	log.Info("authenticated session", "phase", phaseAuthed, "account", id.AccountID)
-	liveSession(conn, deps, id, log)
+	liveSession(ctx, conn, deps, id, log)
 }
 
 // liveSession spawns the client's controlled object, tells it what it controls
-// (SelfAssign) and its initial state (SelfUpdate), then holds the connection
-// open. The controlled object is despawned when the connection drops (no
-// persistence yet). The command/event loop replaces park here in a later slice.
-func liveSession(conn net.Conn, deps Deps, id auth.Identity, log *slog.Logger) {
-	obj := deps.World.SpawnFor()
-	defer deps.World.Despawn(obj.ID)
-	log = log.With("phase", phaseLive, "account", id.AccountID, "object_id", obj.ID)
-	log.Info("self assigned", "x", obj.X, "y", obj.Y)
+// (SelfAssign) and its initial state (SelfUpdate), then runs the live loop:
+// navigation intent in (read loop) and authoritative position out (SelfUpdate on
+// change). The controlled object is despawned when the connection drops (no
+// persistence yet).
+func liveSession(ctx context.Context, conn net.Conn, deps Deps, id auth.Identity, log *slog.Logger) {
+	st := deps.World.SpawnFor()
+	defer deps.World.Despawn(st.ID)
+	log = log.With("phase", phaseLive, "account", id.AccountID, "object_id", st.ID)
+	log.Info("self assigned", "x", st.X, "y", st.Y)
 
-	pos := &pb.Vec2{X: obj.X, Y: obj.Y}
-	if err := sendServer(conn, &pb.SelfAssign{ObjectId: obj.ID, Position: pos}); err != nil {
+	pos := &pb.Vec2{X: st.X, Y: st.Y}
+	if err := sendServer(conn, &pb.SelfAssign{ObjectId: st.ID, Position: pos}); err != nil {
 		log.Warn("write SelfAssign failed", "err", err)
 		return
 	}
-	if err := sendServer(conn, &pb.SelfUpdate{ObjectId: obj.ID, Position: pos}); err != nil {
+	if err := sendServer(conn, &pb.SelfUpdate{ObjectId: st.ID, Position: pos}); err != nil {
 		log.Warn("write SelfUpdate failed", "err", err)
 		return
 	}
-	park(conn)
+
+	// Read loop: apply the client's navigation intent until it disconnects.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		readCommands(conn, deps, st.ID, log)
+	}()
+
+	// Update loop: push a SelfUpdate whenever the object's position changes.
+	ticker := time.NewTicker(selfUpdateInterval)
+	defer ticker.Stop()
+	lastX, lastY := st.X, st.Y
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-done:
+			return
+		case <-ticker.C:
+			cur, ok := deps.World.Get(st.ID)
+			if !ok {
+				return
+			}
+			if cur.X == lastX && cur.Y == lastY {
+				continue
+			}
+			lastX, lastY = cur.X, cur.Y
+			if err := sendServer(conn, &pb.SelfUpdate{ObjectId: st.ID, Position: &pb.Vec2{X: cur.X, Y: cur.Y}}); err != nil {
+				log.Warn("write SelfUpdate failed", "err", err)
+				return
+			}
+		}
+	}
+}
+
+// readCommands decodes client navigation intent (Move/Stop) and applies it to
+// the controlled object, until a read error (typically disconnect) ends it. An
+// unexpected message is logged and ignored rather than tearing down the session.
+func readCommands(conn net.Conn, deps Deps, objID uint64, log *slog.Logger) {
+	for {
+		msg, err := wire.ReadClientMessage(conn)
+		if err != nil {
+			if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrDeadlineExceeded) {
+				log.Info("live read ended", "err", err)
+			}
+			return
+		}
+		switch m := msg.Msg.(type) {
+		case *pb.ClientMessage_Move:
+			if t := m.Move.GetTarget(); t != nil {
+				deps.World.SetTarget(objID, t.GetX(), t.GetY())
+			}
+		case *pb.ClientMessage_Stop:
+			deps.World.Stop(objID)
+		default:
+			log.Warn("unexpected message in live session", "got", msgKind(msg))
+		}
+	}
 }
 
 // handshake performs version negotiation then login. It returns the
@@ -191,17 +259,6 @@ func sendServer(conn net.Conn, payload any) error {
 	return wire.WriteServerMessage(conn, msg)
 }
 
-// park holds an authenticated connection open until the peer disconnects (the
-// live session loop replaces this in a later slice). Reads are discarded.
-func park(conn net.Conn) {
-	buf := make([]byte, 512)
-	for {
-		if _, err := conn.Read(buf); err != nil {
-			return
-		}
-	}
-}
-
 // msgKind returns a short description of which oneof arm is set, for logging.
 func msgKind(m *pb.ClientMessage) string {
 	switch m.Msg.(type) {
@@ -209,6 +266,10 @@ func msgKind(m *pb.ClientMessage) string {
 		return "Hello"
 	case *pb.ClientMessage_Login:
 		return "LoginRequest"
+	case *pb.ClientMessage_Move:
+		return "Move"
+	case *pb.ClientMessage_Stop:
+		return "Stop"
 	case nil:
 		return "empty"
 	default:
