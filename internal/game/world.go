@@ -82,6 +82,37 @@ func (w *World) Despawn(id uint64) {
 	delete(w.objects, id)
 }
 
+// Load inserts objects read from the database at boot, preserving their real ids
+// and positions, and advances nextID past the highest id so later dev spawns
+// don't collide. The DB is the single source of truth; this primes the in-memory
+// active slice (see docs/database.md).
+func (w *World) Load(seeds []ObjectState) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, s := range seeds {
+		w.objects[s.ID] = &Object{ID: s.ID, x: float64(s.X), y: float64(s.Y)}
+		if s.ID > w.nextID {
+			w.nextID = s.ID
+		}
+	}
+}
+
+// Neighbours returns wire-ready snapshots of every object except exclude. This
+// is the naive whole-world set (single starting sector); distance- then
+// sensor-gated interest management is a later slice (see docs/server.md).
+func (w *World) Neighbours(exclude uint64) []ObjectState {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]ObjectState, 0, len(w.objects))
+	for id, obj := range w.objects {
+		if id == exclude {
+			continue
+		}
+		out = append(out, obj.snapshot())
+	}
+	return out
+}
+
 // Get returns the wire-ready state of the object with the given id, and whether
 // it exists.
 func (w *World) Get(id uint64) (ObjectState, bool) {

@@ -21,6 +21,10 @@ var ErrInvalidCredentials = errors.New("auth: invalid credentials")
 type Identity struct {
 	AccountID string // stable account identifier (dev stub: the username)
 	Username  string
+	// ObjectID is the object this account controls, resolved by the DB
+	// authenticator (login → character → object). 0 means none yet — the dev
+	// stub leaves it 0, and the session spawns a fresh object in that case.
+	ObjectID uint64
 }
 
 // Authenticator validates credentials and resolves them to an Identity.

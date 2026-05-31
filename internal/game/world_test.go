@@ -95,6 +95,36 @@ func TestStopHalts(t *testing.T) {
 	}
 }
 
+// TestLoadAndNeighbours verifies DB-loaded objects keep their ids/positions,
+// Neighbours excludes the named object, and nextID advances past loaded ids.
+func TestLoadAndNeighbours(t *testing.T) {
+	w := New()
+	w.Load([]ObjectState{{ID: 10, X: 100, Y: 0}, {ID: 20, X: 0, Y: 200}, {ID: 30, X: -50, Y: -50}})
+	if w.Count() != 3 {
+		t.Fatalf("after load: want 3 objects, got %d", w.Count())
+	}
+
+	got, ok := w.Get(20)
+	if !ok || got.X != 0 || got.Y != 200 {
+		t.Fatalf("Get(20) = %+v, ok=%v; want (0,200)", got, ok)
+	}
+
+	ns := w.Neighbours(20)
+	if len(ns) != 2 {
+		t.Fatalf("Neighbours(20): want 2, got %d", len(ns))
+	}
+	for _, n := range ns {
+		if n.ID == 20 {
+			t.Fatalf("Neighbours(20) included self")
+		}
+	}
+
+	// A later spawn must not collide with the highest loaded id.
+	if sp := w.SpawnFor(); sp.ID <= 30 {
+		t.Fatalf("SpawnFor after load: want id > 30, got %d", sp.ID)
+	}
+}
+
 // tickGet advances the world by dt and returns the object's resulting state.
 func tickGet(w *World, id uint64, dt time.Duration) (ObjectState, bool) {
 	w.Tick(dt)

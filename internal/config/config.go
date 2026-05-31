@@ -23,8 +23,12 @@ type Config struct {
 
 	HandshakeTimeout time.Duration // read deadline for the version+login handshake
 
-	// Dev auth (stub): a single configured account, used until DB-backed auth
-	// lands. An empty DevSecret rejects all logins (no accidental accept-all).
+	// AuthMode selects the authenticator: "db" (default, PostgreSQL + bcrypt) or
+	// "dev" (the offline stub below, for running without seeded credentials).
+	AuthMode string
+
+	// Dev auth (stub): a single configured account, used with AuthMode="dev".
+	// An empty DevSecret rejects all logins (no accidental accept-all).
 	DevUser   string
 	DevSecret string
 }
@@ -38,6 +42,7 @@ func Load() Config {
 
 		HandshakeTimeout: envDuration("STARRAID_HANDSHAKE_TIMEOUT", 10*time.Second),
 
+		AuthMode:  env("STARRAID_AUTH", "db"),
 		DevUser:   env("STARRAID_DEV_USER", "dev"),
 		DevSecret: env("STARRAID_DEV_SECRET", ""),
 	}

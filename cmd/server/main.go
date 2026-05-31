@@ -20,10 +20,6 @@ func main() {
 	cfg := config.Load()
 	slog.Info("starraid server starting", "listen", cfg.ListenAddr, "admin", cfg.AdminAddr,
 		"protocol_version", config.ProtocolVersion, "min_client_version", config.MinClientVersion)
-	if cfg.DevSecret == "" {
-		slog.Warn("dev auth disabled: STARRAID_DEV_SECRET is empty, all logins will be rejected")
-	}
-
 	// The server owns the schema and applies migrations on startup (idempotent;
 	// see docs/database.md). Standalone runs use cmd/migrate (`just migrate`).
 	if err := db.Migrate(cfg.DatabaseURL); err != nil {
@@ -34,17 +30,54 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// The authoritative in-memory world (active slice). Real startup loads the
-	// world setting + active-area objects from PostgreSQL.
+	// PostgreSQL is the single source of truth. Open the pool and prime the
+	// in-memory active slice from the starting sector (see docs/database.md).
+	pool, err := db.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		slog.Error("database connect failed", "err", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
 	world := game.New()
+	if sectorID, ok, err := pool.FirstSectorID(ctx); err != nil {
+		slog.Error("load starting sector failed", "err", err)
+		os.Exit(1)
+	} else if ok {
+		objs, err := pool.LoadSectorObjects(ctx, sectorID)
+		if err != nil {
+			slog.Error("load sector objects failed", "err", err)
+			os.Exit(1)
+		}
+		states := make([]game.ObjectState, len(objs))
+		for i, o := range objs {
+			states[i] = game.ObjectState{ID: o.ID, X: o.X, Y: o.Y}
+		}
+		world.Load(states)
+		slog.Info("loaded starting sector", "sector_id", sectorID, "objects", len(states))
+	} else {
+		slog.Warn("no sector found; world starts empty (run the admin seed)")
+	}
 	go world.Run(ctx)
 
-	// Per-connection handshake dependencies (version negotiation + auth). The dev
-	// auth stub stands in until DB-backed credentials land (see docs/server.md).
+	// Authenticator: DB-backed (bcrypt) by default; the offline dev stub when
+	// AuthMode="dev" (see docs/server.md).
+	var authn auth.Authenticator
+	switch cfg.AuthMode {
+	case "dev":
+		if cfg.DevSecret == "" {
+			slog.Warn("dev auth selected but STARRAID_DEV_SECRET is empty: all logins will be rejected")
+		}
+		authn = auth.Dev{User: cfg.DevUser, Secret: cfg.DevSecret}
+	default:
+		authn = auth.DBAuthenticator{Pool: pool}
+	}
+
+	// Per-connection handshake dependencies (version negotiation + auth).
 	deps := session.Deps{
 		ProtocolVersion:  config.ProtocolVersion,
 		MinClientVersion: config.MinClientVersion,
-		Auth:             auth.Dev{User: cfg.DevUser, Secret: cfg.DevSecret},
+		Auth:             authn,
 		World:            world,
 		HandshakeTimeout: cfg.HandshakeTimeout,
 		Logger:           slog.Default(),

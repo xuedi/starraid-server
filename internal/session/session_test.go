@@ -137,6 +137,44 @@ func TestHappyPath(t *testing.T) {
 	}
 }
 
+// TestNeighbourBeacons verifies that after SelfAssign/SelfUpdate the server
+// pushes one ObjectEnter per other object in the world.
+func TestNeighbourBeacons(t *testing.T) {
+	w := game.New()
+	w.Load([]game.ObjectState{{ID: 1, X: 100, Y: 0}, {ID: 2, X: 0, Y: 100}})
+	deps := defaultDeps()
+	deps.World = w
+	addr, stop := serve(t, deps)
+	defer stop()
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	authenticate(t, conn)
+
+	if readServer(t, conn).GetSelfAssign() == nil {
+		t.Fatalf("want SelfAssign")
+	}
+	if readServer(t, conn).GetSelfUpdate() == nil {
+		t.Fatalf("want SelfUpdate")
+	}
+
+	// One ObjectEnter per pre-loaded neighbour (order not guaranteed).
+	seen := map[uint64]bool{}
+	for i := 0; i < 2; i++ {
+		oe := readServer(t, conn).GetObjectEnter()
+		if oe == nil {
+			t.Fatalf("want ObjectEnter (#%d)", i+1)
+		}
+		seen[oe.ObjectId] = true
+	}
+	if !seen[1] || !seen[2] {
+		t.Fatalf("want ObjectEnter for ids 1 and 2, got %v", seen)
+	}
+}
+
 // TestControlledObjectDespawnsOnDisconnect verifies the assigned object exists
 // while the connection is live and is removed once it drops.
 func TestControlledObjectDespawnsOnDisconnect(t *testing.T) {

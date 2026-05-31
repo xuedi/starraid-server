@@ -32,6 +32,7 @@ type World interface {
 	SetTarget(id uint64, tx, ty int64)
 	Stop(id uint64)
 	Get(id uint64) (game.ObjectState, bool)
+	Neighbours(exclude uint64) []game.ObjectState
 }
 
 // Deps is the per-connection dependency set Handle needs.
@@ -90,32 +91,51 @@ func Handle(ctx context.Context, conn net.Conn, deps Deps) {
 	liveSession(ctx, conn, deps, id, log)
 }
 
-// liveSession spawns the client's controlled object, tells it what it controls
-// (SelfAssign) and its initial state (SelfUpdate), then runs the live loop:
-// navigation intent in (read loop) and authoritative position out (SelfUpdate on
-// change). The controlled object is despawned when the connection drops (no
-// persistence yet).
+// liveSession resolves the client's controlled object — the one assigned at
+// login (loaded from the DB), or a freshly spawned one when the identity carries
+// none (dev/offline auth) — tells the client what it controls (SelfAssign) and
+// its initial state (SelfUpdate), pushes ObjectEnter beacons for the neighbours
+// it can perceive, then runs the live loop: navigation intent in (read loop) and
+// authoritative position out (SelfUpdate on change). A spawned object is
+// despawned on disconnect; a DB-loaded object persists (the DB owns it).
 func liveSession(ctx context.Context, conn net.Conn, deps Deps, id auth.Identity, log *slog.Logger) {
-	st := deps.World.SpawnFor()
-	defer deps.World.Despawn(st.ID)
-	log = log.With("phase", phaseLive, "account", id.AccountID, "object_id", st.ID)
-	log.Info("self assigned", "x", st.X, "y", st.Y)
+	objID := id.ObjectID
+	st, ok := deps.World.Get(objID)
+	spawned := false
+	if objID == 0 || !ok {
+		st = deps.World.SpawnFor()
+		objID = st.ID
+		spawned = true
+		defer deps.World.Despawn(objID)
+	}
+
+	log = log.With("phase", phaseLive, "account", id.AccountID, "object_id", objID)
+	log.Info("self assigned", "x", st.X, "y", st.Y, "spawned", spawned)
 
 	pos := &pb.Vec2{X: st.X, Y: st.Y}
-	if err := sendServer(conn, &pb.SelfAssign{ObjectId: st.ID, Position: pos}); err != nil {
+	if err := sendServer(conn, &pb.SelfAssign{ObjectId: objID, Position: pos}); err != nil {
 		log.Warn("write SelfAssign failed", "err", err)
 		return
 	}
-	if err := sendServer(conn, &pb.SelfUpdate{ObjectId: st.ID, Position: pos}); err != nil {
+	if err := sendServer(conn, &pb.SelfUpdate{ObjectId: objID, Position: pos}); err != nil {
 		log.Warn("write SelfUpdate failed", "err", err)
 		return
+	}
+
+	// Neighbour beacons: announce every other object the client can perceive
+	// (naive whole-sector set for now; distance/sensor gating is a later slice).
+	for _, n := range deps.World.Neighbours(objID) {
+		if err := sendServer(conn, &pb.ObjectEnter{ObjectId: n.ID, Position: &pb.Vec2{X: n.X, Y: n.Y}}); err != nil {
+			log.Warn("write ObjectEnter failed", "err", err)
+			return
+		}
 	}
 
 	// Read loop: apply the client's navigation intent until it disconnects.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		readCommands(conn, deps, st.ID, log)
+		readCommands(conn, deps, objID, log)
 	}()
 
 	// Update loop: push a SelfUpdate whenever the object's position changes.
@@ -129,7 +149,7 @@ func liveSession(ctx context.Context, conn net.Conn, deps Deps, id auth.Identity
 		case <-done:
 			return
 		case <-ticker.C:
-			cur, ok := deps.World.Get(st.ID)
+			cur, ok := deps.World.Get(objID)
 			if !ok {
 				return
 			}
@@ -137,7 +157,7 @@ func liveSession(ctx context.Context, conn net.Conn, deps Deps, id auth.Identity
 				continue
 			}
 			lastX, lastY = cur.X, cur.Y
-			if err := sendServer(conn, &pb.SelfUpdate{ObjectId: st.ID, Position: &pb.Vec2{X: cur.X, Y: cur.Y}}); err != nil {
+			if err := sendServer(conn, &pb.SelfUpdate{ObjectId: objID, Position: &pb.Vec2{X: cur.X, Y: cur.Y}}); err != nil {
 				log.Warn("write SelfUpdate failed", "err", err)
 				return
 			}
@@ -253,6 +273,12 @@ func sendServer(conn net.Conn, payload any) error {
 		msg.Msg = &pb.ServerMessage_SelfAssign{SelfAssign: p}
 	case *pb.SelfUpdate:
 		msg.Msg = &pb.ServerMessage_SelfUpdate{SelfUpdate: p}
+	case *pb.ObjectEnter:
+		msg.Msg = &pb.ServerMessage_ObjectEnter{ObjectEnter: p}
+	case *pb.ObjectUpdate:
+		msg.Msg = &pb.ServerMessage_ObjectUpdate{ObjectUpdate: p}
+	case *pb.ObjectLeave:
+		msg.Msg = &pb.ServerMessage_ObjectLeave{ObjectLeave: p}
 	default:
 		return fmt.Errorf("session: unknown server payload %T", payload)
 	}
