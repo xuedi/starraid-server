@@ -59,6 +59,10 @@ vet: _workspace
 db-up:
     docker compose up -d db
 
+# Apply database migrations (goose; the server also runs these on startup)
+migrate: _workspace
+    go run ./cmd/migrate
+
 # Stop the database
 db-down:
     docker compose down
