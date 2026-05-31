@@ -11,7 +11,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - starraid-db:/var/lib/postgresql/data
+      - starraid-db:/var/lib/postgresql
 
 volumes:
   starraid-db:
