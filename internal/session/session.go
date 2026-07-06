@@ -36,6 +36,14 @@ type World interface {
 	Perceived(id uint64) []game.ObjectState
 }
 
+// SessionMetrics observes authenticated live sessions for telemetry (the /stats
+// surface). *stats.Registry satisfies it structurally; a nil Deps.Metrics
+// disables the hook (tests, or a server without the control surface).
+type SessionMetrics interface {
+	SessionStart()
+	SessionEnd()
+}
+
 // Deps is the per-connection dependency set Handle needs.
 type Deps struct {
 	ProtocolVersion  uint32             // version this server speaks
@@ -44,6 +52,7 @@ type Deps struct {
 	World            World              // controlled-object spawn + navigation
 	HandshakeTimeout time.Duration      // read deadline covering hello+login
 	Logger           *slog.Logger       // per-connection structured logging
+	Metrics          SessionMetrics     // optional: live-session gauge for /stats (nil-safe)
 }
 
 // phase names for structured logging and protocol-error reporting.
@@ -100,6 +109,10 @@ func Handle(ctx context.Context, conn net.Conn, deps Deps) {
 // authoritative position out (SelfUpdate on change). A spawned object is
 // despawned on disconnect; a DB-loaded object persists (the DB owns it).
 func liveSession(ctx context.Context, conn net.Conn, deps Deps, id auth.Identity, log *slog.Logger) {
+	if deps.Metrics != nil {
+		deps.Metrics.SessionStart()
+		defer deps.Metrics.SessionEnd()
+	}
 	objID := id.ObjectID
 	st, ok := deps.World.Get(objID)
 	spawned := false

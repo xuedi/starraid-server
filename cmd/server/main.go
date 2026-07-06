@@ -5,6 +5,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,6 +16,7 @@ import (
 	"github.com/xuedi/starraid-server/internal/db"
 	"github.com/xuedi/starraid-server/internal/game"
 	"github.com/xuedi/starraid-server/internal/session"
+	"github.com/xuedi/starraid-server/internal/stats"
 )
 
 func main() {
@@ -76,6 +78,11 @@ func main() {
 	}
 	go world.Run(ctx)
 
+	// Read-only telemetry surface: live session/object/tick counts polled by the
+	// control tools (stackctl, later the admin console) over HTTP on AdminAddr.
+	reg := stats.New(world.Count, 10.0) // ~10 Hz placeholder tick (see game.World.Run)
+	go serveControl(ctx, cfg.AdminAddr, reg)
+
 	// Authenticator: DB-backed (bcrypt) by default; the offline dev stub when
 	// AuthMode="dev" (see docs/server.md).
 	var authn auth.Authenticator
@@ -97,6 +104,7 @@ func main() {
 		World:            world,
 		HandshakeTimeout: cfg.HandshakeTimeout,
 		Logger:           slog.Default(),
+		Metrics:          reg,
 	}
 
 	// Game wire protocol: Protobuf over TCP (see docs/protocol.md).
@@ -129,5 +137,20 @@ func acceptLoop(ctx context.Context, ln net.Listener, deps session.Deps) {
 			defer conn.Close()
 			session.Handle(ctx, conn, deps)
 		}()
+	}
+}
+
+// serveControl runs the read-only control/telemetry HTTP surface (health + stats)
+// on addr until ctx is cancelled. Not fatal if it fails — the game wire is the
+// server's real job.
+func serveControl(ctx context.Context, addr string, reg *stats.Registry) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
+	mux.HandleFunc("/stats", reg.Handler())
+	srv := &http.Server{Addr: addr, Handler: mux}
+	go func() { <-ctx.Done(); _ = srv.Shutdown(context.Background()) }()
+	slog.Info("control surface listening", "addr", addr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Error("control surface failed", "err", err)
 	}
 }
