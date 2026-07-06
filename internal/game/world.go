@@ -15,6 +15,14 @@ import (
 // maxSpeed instead (see attributes.go).
 const defaultSpawnSpeed = 200.0
 
+// perceptionRange is the placeholder distance (world units) within which one
+// object can perceive another before the sensor-vs-jammer rule refines it (the
+// archive's distance cull). Author-tunable placeholder like defaultSpawnSpeed —
+// the starting scene spans ~11k units from origin, so this keeps most of it
+// visible while still culling the far edge. Subsumed by the sensor rule once
+// jammers are fitted (see canPerceive, docs/objects.md §Perception).
+const perceptionRange = 10000.0
+
 // Object is a single unit of simulation (see docs/objects.md — everything is an
 // object): id + position + an optional move target, plus its per-instance fitting
 // (modules + cargo) and the attributes DERIVED and cached from that fitting.
@@ -59,8 +67,9 @@ type World struct {
 	mu      sync.Mutex
 	objects map[uint64]*Object
 	nextID  uint64
-	// TODO: active-area clusters, interest management, cached per-object
-	// attributes (recomputed on module-config change).
+	// Interest management: perception is distance- + sensor-gated per observer
+	// (see Perceived). TODO: active-area clusters and a spatial index (the scan
+	// in Perceived is O(n) per observer — fine for the single starting sector).
 }
 
 // New creates an empty world. Real startup loads the world setting and
@@ -124,20 +133,50 @@ func (w *World) Load(seeds []Seed) {
 	}
 }
 
-// Neighbours returns wire-ready snapshots of every object except exclude. This
-// is the naive whole-world set (single starting sector); distance- then
-// sensor-gated interest management is a later slice (see docs/server.md).
-func (w *World) Neighbours(exclude uint64) []ObjectState {
+// Perceived returns wire-ready snapshots of the objects the object with the given
+// id can currently perceive — the interest-managed neighbour set the session
+// streams as ObjectEnter/Update/Leave (see docs/server.md §Interest management).
+// An object is perceived when it is (1) within perceptionRange AND (2) not hidden
+// from this observer by the sensor-vs-jammer rule (see canPerceive). Excludes the
+// observer itself; returns nil if it no longer exists.
+func (w *World) Perceived(id uint64) []ObjectState {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	self, ok := w.objects[id]
+	if !ok {
+		return nil
+	}
+	const rangeSq = perceptionRange * perceptionRange
 	out := make([]ObjectState, 0, len(w.objects))
-	for id, obj := range w.objects {
-		if id == exclude {
+	for oid, obj := range w.objects {
+		if oid == id {
 			continue
+		}
+		dx, dy := obj.x-self.x, obj.y-self.y
+		if dx*dx+dy*dy > rangeSq {
+			continue // out of range — distance gate (the archive's calcDist cull)
+		}
+		if !self.canPerceive(obj) {
+			continue // hidden by a jammer stronger than our sensors — sensor gate
 		}
 		out = append(out, obj.snapshot())
 	}
 	return out
+}
+
+// canPerceive reports whether o's sensors can pick out target given target's
+// jamming.
+//
+// PLACEHOLDER RULE (author decision — do not treat as final): the observer is
+// blinded only when the target's jammer STRICTLY EXCEEDS the observer's scanner.
+// So an unjammed target — and every object when nothing is fitted (0 ≤ 0) — stays
+// visible, making the gate degrade safely to pure distance until jammers appear.
+// The real comparison (threshold vs. ratio vs. additive, plus any size-class
+// scaling) is an open decision flagged at docs/objects.md §"exact sensor-vs-jammer
+// visibility". Keep the whole rule inside this one helper so swapping it later is
+// a one-function change.
+func (o *Object) canPerceive(target *Object) bool {
+	return target.attrs.jammer <= o.attrs.scanner
 }
 
 // Get returns the wire-ready state of the object with the given id, and whether

@@ -35,8 +35,9 @@ type Class struct {
 // serialises it into module_types.params) and the server's attribute derivation
 // (which parses it back — see package game). A module's ROLE is read from which
 // fields are set: PowerOutput>0 → generator, ShieldCapacity>0 → shield,
-// Thrust>0 → thruster. A bare mount (e.g. a turret) sets none and contributes
-// only its mass. Fuel burn is a later slice; the field is carried but unused.
+// Thrust>0 → thruster, Scanner>0 → sensor, Jammer>0 → jammer. A bare mount (e.g.
+// a turret) sets none and contributes only its mass. Fuel burn is a later slice;
+// the field is carried but unused.
 type ModuleParams struct {
 	PowerOutput       float64 `json:"power_output,omitempty"`
 	FuelItem          string  `json:"fuel_item,omitempty"`
@@ -45,6 +46,8 @@ type ModuleParams struct {
 	PowerDraw         float64 `json:"power_draw,omitempty"`
 	RechargeRate      float64 `json:"recharge_rate,omitempty"`
 	Thrust            float64 `json:"thrust,omitempty"`
+	Scanner           float64 `json:"scanner,omitempty"` // sensor strength (interest management)
+	Jammer            float64 `json:"jammer,omitempty"`  // jamming strength (interest management)
 }
 
 // Module is a code-defined installable module.
@@ -92,6 +95,10 @@ var Modules = []Module{
 		Params: ModuleParams{ShieldCapacity: 500, PowerDraw: 30, RechargeRate: 20}},
 	{Key: "thruster_ion", Name: "Ion Thruster", SlotKind: "internal", SizeClass: "N", Mass: 100,
 		Params: ModuleParams{Thrust: 250000, PowerDraw: 40}},
+	{Key: "sensor_basic", Name: "Basic Sensor Array", SlotKind: "external", SizeClass: "N", Mass: 80,
+		Params: ModuleParams{Scanner: 100, PowerDraw: 15}},
+	{Key: "jammer_basic", Name: "Basic ECM Jammer", SlotKind: "external", SizeClass: "N", Mass: 120,
+		Params: ModuleParams{Jammer: 100, PowerDraw: 25}},
 }
 
 // Items is the code-defined cargo item roster.

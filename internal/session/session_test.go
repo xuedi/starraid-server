@@ -138,7 +138,8 @@ func TestHappyPath(t *testing.T) {
 }
 
 // TestNeighbourBeacons verifies that after SelfAssign/SelfUpdate the server
-// pushes one ObjectEnter per other object in the world.
+// pushes one ObjectEnter per perceived neighbour — both loaded objects sit at the
+// origin, well within perception range of the spawned controlled object.
 func TestNeighbourBeacons(t *testing.T) {
 	w := game.New()
 	w.Load([]game.Seed{

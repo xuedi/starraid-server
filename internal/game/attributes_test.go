@@ -82,6 +82,43 @@ func TestOverdrawCutsThruster(t *testing.T) {
 	}
 }
 
+func TestDerivesScannerAndJammer(t *testing.T) {
+	// A bare hull derives no sensing; adding a sensor and two jammers sums each.
+	if bare := fit(skiffBaseMass, skiffModules(), nil); bare.attrs.scanner != 0 || bare.attrs.jammer != 0 {
+		t.Fatalf("bare skiff: want scanner=0 jammer=0, got scanner=%v jammer=%v",
+			bare.attrs.scanner, bare.attrs.jammer)
+	}
+	mods := append(skiffModules(),
+		Module{Mass: 80, Params: catalog.ModuleParams{Scanner: 100}},
+		Module{Mass: 120, Params: catalog.ModuleParams{Jammer: 40}},
+		Module{Mass: 120, Params: catalog.ModuleParams{Jammer: 60}},
+	)
+	o := fit(skiffBaseMass, mods, nil)
+	if o.attrs.scanner != 100 {
+		t.Fatalf("scanner: want 100, got %v", o.attrs.scanner)
+	}
+	if o.attrs.jammer != 100 {
+		t.Fatalf("jammer: want 40+60=100, got %v", o.attrs.jammer)
+	}
+}
+
+// TestCanPerceive pins the placeholder sensor-vs-jammer rule: an observer sees a
+// target unless the target's jammer strictly exceeds the observer's scanner.
+func TestCanPerceive(t *testing.T) {
+	scan := func(v float64) *Object { return fit(0, []Module{{Params: catalog.ModuleParams{Scanner: v}}}, nil) }
+	jam := func(v float64) *Object { return fit(0, []Module{{Params: catalog.ModuleParams{Jammer: v}}}, nil) }
+
+	if !scan(100).canPerceive(jam(100)) {
+		t.Fatalf("equal scanner/jammer (100 ≤ 100): want perceived")
+	}
+	if scan(100).canPerceive(jam(101)) {
+		t.Fatalf("jammer 101 > scanner 100: want hidden")
+	}
+	if !scan(0).canPerceive(jam(0)) {
+		t.Fatalf("nothing fitted (0 ≤ 0): want perceived (degrades to pure distance)")
+	}
+}
+
 func TestLadenShipIsSlower(t *testing.T) {
 	empty := fit(skiffBaseMass, skiffModules(), nil)
 	laden := fit(skiffBaseMass, skiffModules(), []Cargo{{UnitMass: 5, Quantity: 1000}}) // +5000 mass

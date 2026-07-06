@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/xuedi/starraid-server/internal/catalog"
 )
 
 func TestSpawnGetDespawn(t *testing.T) {
@@ -95,13 +97,19 @@ func TestStopHalts(t *testing.T) {
 	}
 }
 
-// TestLoadAndNeighbours verifies DB-loaded objects keep their ids/positions,
-// Neighbours excludes the named object, and nextID advances past loaded ids.
-func TestLoadAndNeighbours(t *testing.T) {
+// TestLoadAndPerceived verifies DB-loaded objects keep their ids/positions,
+// Perceived excludes the observer and gates by distance (perceptionRange), and
+// nextID advances past loaded ids.
+func TestLoadAndPerceived(t *testing.T) {
 	w := New()
-	w.Load([]Seed{{ID: 10, X: 100, Y: 0}, {ID: 20, X: 0, Y: 200}, {ID: 30, X: -50, Y: -50}})
-	if w.Count() != 3 {
-		t.Fatalf("after load: want 3 objects, got %d", w.Count())
+	w.Load([]Seed{
+		{ID: 10, X: 100, Y: 0},
+		{ID: 20, X: 0, Y: 200},
+		{ID: 30, X: -50, Y: -50},
+		{ID: 40, X: 100000, Y: 0}, // far beyond perceptionRange from the others
+	})
+	if w.Count() != 4 {
+		t.Fatalf("after load: want 4 objects, got %d", w.Count())
 	}
 
 	got, ok := w.Get(20)
@@ -109,19 +117,58 @@ func TestLoadAndNeighbours(t *testing.T) {
 		t.Fatalf("Get(20) = %+v, ok=%v; want (0,200)", got, ok)
 	}
 
-	ns := w.Neighbours(20)
+	// Perceived(20): the two nearby objects (10, 30) — excluding self (20) and the
+	// out-of-range one (40).
+	ns := w.Perceived(20)
 	if len(ns) != 2 {
-		t.Fatalf("Neighbours(20): want 2, got %d", len(ns))
+		t.Fatalf("Perceived(20): want 2 (nearby, minus self and far), got %d: %+v", len(ns), ns)
 	}
 	for _, n := range ns {
 		if n.ID == 20 {
-			t.Fatalf("Neighbours(20) included self")
+			t.Fatalf("Perceived(20) included self")
+		}
+		if n.ID == 40 {
+			t.Fatalf("Perceived(20) included the out-of-range object 40")
 		}
 	}
 
+	// A missing observer perceives nothing.
+	if got := w.Perceived(999); got != nil {
+		t.Fatalf("Perceived(missing): want nil, got %+v", got)
+	}
+
 	// A later spawn must not collide with the highest loaded id.
-	if sp := w.SpawnFor(); sp.ID <= 30 {
-		t.Fatalf("SpawnFor after load: want id > 30, got %d", sp.ID)
+	if sp := w.SpawnFor(); sp.ID <= 40 {
+		t.Fatalf("SpawnFor after load: want id > 40, got %d", sp.ID)
+	}
+}
+
+// TestPerceivedSensorGate verifies the sensor-vs-jammer gate: an in-range object
+// running a jammer stronger than the observer's sensors is not perceived, while
+// an unjammed (or weakly jammed) in-range object is.
+func TestPerceivedSensorGate(t *testing.T) {
+	sensor := Module{Mass: 80, Params: catalog.ModuleParams{Scanner: 100}}
+	weakJam := Module{Mass: 120, Params: catalog.ModuleParams{Jammer: 50}}
+	strongJam := Module{Mass: 120, Params: catalog.ModuleParams{Jammer: 200}}
+
+	w := New()
+	w.Load([]Seed{
+		{ID: 1, X: 0, Y: 0, Modules: []Module{sensor}},       // observer, scanner 100
+		{ID: 2, X: 100, Y: 0},                                // unjammed → visible
+		{ID: 3, X: 100, Y: 100, Modules: []Module{weakJam}},  // jammer 50 ≤ 100 → visible
+		{ID: 4, X: -100, Y: 0, Modules: []Module{strongJam}}, // jammer 200 > 100 → hidden
+	})
+
+	ns := w.Perceived(1)
+	got := map[uint64]bool{}
+	for _, n := range ns {
+		got[n.ID] = true
+	}
+	if !got[2] || !got[3] {
+		t.Fatalf("Perceived(1): want to see 2 (unjammed) and 3 (weak jammer), got %v", got)
+	}
+	if got[4] {
+		t.Fatalf("Perceived(1): saw 4, which out-jams our sensors (200 > 100)")
 	}
 }
 

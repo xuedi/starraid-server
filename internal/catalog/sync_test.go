@@ -35,8 +35,8 @@ func TestSyncUpsertsWholeRoster(t *testing.T) {
 	if f.classes != len(Classes) || f.classes != 6 {
 		t.Fatalf("classes upserted: want 6, got %d (roster %d)", f.classes, len(Classes))
 	}
-	if f.modules != len(Modules) || f.modules != 3 {
-		t.Fatalf("modules upserted: want 3, got %d (roster %d)", f.modules, len(Modules))
+	if f.modules != len(Modules) || f.modules != 5 {
+		t.Fatalf("modules upserted: want 5, got %d (roster %d)", f.modules, len(Modules))
 	}
 	if f.items != len(Items) || f.items != 4 {
 		t.Fatalf("items upserted: want 4, got %d (roster %d)", f.items, len(Items))

@@ -26,6 +26,8 @@ type attrs struct {
 	powerProduction float64
 	powerDraw       float64 // actual draw after the overdraw cutoff
 	shieldCapacity  float64 // 0 if the shield is cut by overdraw
+	scanner         float64 // Σ sensor strength — drives interest management (perception)
+	jammer          float64 // Σ jamming strength — hides this object from weaker sensors
 	thrusterActive  bool
 	shieldActive    bool
 }
@@ -38,7 +40,7 @@ type attrs struct {
 // object is therefore slower than an empty one.
 func (o *Object) recompute() {
 	mass := o.baseMass
-	var production, thrust, thrusterDraw, shieldDraw, shieldCap float64
+	var production, thrust, thrusterDraw, shieldDraw, shieldCap, scanner, jammer float64
 	for _, m := range o.modules {
 		mass += m.Mass
 		p := m.Params
@@ -51,6 +53,11 @@ func (o *Object) recompute() {
 			shieldDraw += p.PowerDraw
 			shieldCap += p.ShieldCapacity
 		}
+		// Sensor/jammer feed interest management (perception), not the movement
+		// or overdraw model. Their PowerDraw is not yet in the power budget — the
+		// placeholder power model only gates thruster then shield (power.md).
+		scanner += p.Scanner
+		jammer += p.Jammer
 	}
 	for _, c := range o.cargo {
 		mass += c.UnitMass * c.Quantity
@@ -69,6 +76,8 @@ func (o *Object) recompute() {
 	o.attrs = attrs{
 		totalMass:       mass,
 		powerProduction: production,
+		scanner:         scanner,
+		jammer:          jammer,
 		thrusterActive:  thrusterActive,
 		shieldActive:    shieldActive,
 	}
