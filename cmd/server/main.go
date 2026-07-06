@@ -93,7 +93,16 @@ func main() {
 		}
 		authn = auth.Dev{User: cfg.DevUser, Secret: cfg.DevSecret}
 	default:
-		authn = auth.DBAuthenticator{Pool: pool}
+		dbAuth := auth.DBAuthenticator{Pool: pool}
+		authn = dbAuth
+		// When a dev secret is configured, also accept the dev stub alongside DB
+		// auth so dispatcher bots (dev creds → a fresh dev-spawned object each)
+		// coexist with human DB logins. Opt-in: prod leaves STARRAID_DEV_SECRET
+		// empty and only DB accounts are accepted.
+		if cfg.DevSecret != "" {
+			authn = auth.Any{dbAuth, auth.Dev{User: cfg.DevUser, Secret: cfg.DevSecret}}
+			slog.Info("dev-stub auth accepted alongside DB auth (STARRAID_DEV_SECRET set)", "dev_user", cfg.DevUser)
+		}
 	}
 
 	// Per-connection handshake dependencies (version negotiation + auth).
